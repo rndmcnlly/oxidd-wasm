@@ -49,7 +49,7 @@ Any static file server works for deployment; no special headers required.
 
 ## Using the API
 
-All calls are async (they cross a worker boundary):
+Declare variables, build a formula with AND/OR/NOT, and count its satisfying assignments. All calls are async because they cross the worker boundary:
 
 ```js
 import { OxiddClient } from "./index.js";
@@ -57,23 +57,38 @@ import { OxiddClient } from "./index.js";
 const client = new OxiddClient();
 await client.init();
 
+// newManager(inner_node_capacity, apply_cache_capacity)
 const mgr = await client.newManager(65536, 65536);
-const [a, b] = await mgr.addVars(2);
 
+// Declare two boolean variables; addVars returns their integer ids.
+const [a, b] = await mgr.addVars(2);
 const va = await mgr.var_(a);
 const vb = await mgr.var_(b);
-const expr = await (await va.and(vb)).or(await va.not());
 
-console.log(await expr.satCount(2));  // 3
+// f = (a AND b) OR (NOT a)
+const ab   = await va.and(vb);
+const nota = await va.not();
+const f    = await ab.or(nota);
+
+console.log(await f.satCount(2));  // 3 out of 4 assignments
+console.log(await f.nodeCount());  // DAG size
 ```
 
-Every primitive BDD op is one postMessage round-trip, so latency-bound workloads should use the iota batched-command-buffer path instead.
+### Every op is a round-trip
+
+Each `.and`, `.or`, `.not`, etc. is one `postMessage` to the worker, one synchronous Rust call, and one `postMessage` back. That's fine for a few dozen ops. It is a disaster for building multi-million-node BDDs from JS one apply at a time: on a realistic workload the postMessage latency dominates the actual BDD work by ~10x.
+
+### Batched command buffers
+
+The fix is a graphics-API analogy. Instead of issuing one draw call per primitive, you fill a command buffer with an entire scene's worth of work and submit it once. Here the "scene" is a program of BDD ops (`ops`, `a`, `b`, `c`, `outputs` arrays, one row per op) referring to previously-bound BDD handles and to each other by index. `CommandBuffer::submit` runs the whole program inside a single Rust entry and returns all requested result handles in one reply.
+
+The command-buffer primitive is exposed directly in `www/manager-worker.js` (`cbNew`, `cbBind`, `cbSetProgram`, `cbSubmit`), but you don't usually touch it by hand. The iota layer below is designed around it.
 
 ## iota: typed symbolic programming
 
 `www/iota.js` is a higher-level layer inspired by [`omega.symbolic.fol`](https://github.com/tulip-control/omega): typed unsigned integers, booleans, primed counterparts for transition systems, a bitblaster that compiles expressions like `x * y = z` into BDD operations, and fused operations like `image` and `preimage` that live Rust-side.
 
-The core design is a graphics-API-style command buffer: iota's builder API is synchronous and returns lazy IR nodes, and `ctx.evaluate([exprs])` submits the entire IR graph to the worker in one postMessage. Shared subexpressions are CSE'd by object identity before emission.
+iota's builder API is synchronous and returns lazy IR nodes; calling `ctx.evaluate([exprs])` is what actually emits a command buffer and submits it in one postMessage. Shared subexpressions are CSE'd by object identity before emission.
 
 ```js
 import { Context } from "./iota.js";
@@ -84,9 +99,12 @@ await ctx.declareUint("x", 8);
 await ctx.declareUint("y", 8);
 await ctx.declareUint("z", 8);
 
+// Build the IR (synchronous, no worker traffic):
 const rel = ctx.eq(ctx.mul("x", "y"), "z");
+
+// One round-trip for the entire bitblast:
 const [bdd] = await ctx.evaluate([rel]);
-console.log(await bdd.satCount(await ctx.numVars()));    // 65536
+console.log(await bdd.satCount(await ctx.numVars()));  // 65536
 ```
 
 Heavyweight traversals (`support`, `pick_cube`, `cube`, `image`, `preimage`, `substitute`) live in Rust as single FFI hops; the bitblaster and fixpoint loops stay in JS where they're readable and interruptible.
