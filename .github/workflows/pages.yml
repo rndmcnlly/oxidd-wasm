@@ -1,0 +1,66 @@
+name: Deploy demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust nightly
+        run: |
+          rustup toolchain install nightly --component rust-src
+          rustup target add wasm32-unknown-unknown --toolchain nightly
+          rustup override set nightly
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM
+        env:
+          RUSTFLAGS: >
+            -C target-feature=+atomics,+bulk-memory,+mutable-globals
+            -C link-arg=--import-memory
+            -C link-arg=--shared-memory
+            -C link-arg=--max-memory=1073741824
+            -C link-arg=--export=__wasm_init_tls
+            -C link-arg=--export=__tls_size
+            -C link-arg=--export=__tls_align
+            -C link-arg=--export=__tls_base
+        run: |
+          wasm-pack build crates/oxidd-wasm \
+            --target web \
+            --out-dir ../../www/pkg \
+            --release \
+            -- -Z build-std=panic_abort,std
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: www
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

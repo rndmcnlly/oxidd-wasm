@@ -1,0 +1,16 @@
+# Rust
+target/
+**/target/
+Cargo.lock
+
+# Build artifacts
+www/pkg/
+
+# Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local
+*.log
+server.log

@@ -1,0 +1,4 @@
+[submodule "vendor/oxidd"]
+	path = vendor/oxidd
+	url = https://github.com/rndmcnlly/oxidd.git
+	branch = wasm32-support

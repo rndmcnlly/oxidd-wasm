@@ -1,0 +1,35 @@
+[package]
+name = "oxidd-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings for OxiDD with rayon threading"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rndmcnlly/oxidd-wasm"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oxidd = { path = "../../vendor/oxidd/crates/oxidd", features = [
+  "manager-index",
+  "bdd",
+  "bcdd",
+  "zbdd",
+  "multi-threading",
+  "apply-cache-direct-mapped",
+], default-features = false }
+oxidd-core = { path = "../../vendor/oxidd/crates/oxidd-core" }
+
+wasm-bindgen = "0.2"
+wasm-bindgen-rayon = { version = "1.2", features = ["no-bundler"] }
+rayon = "1.10"
+parking_lot = { version = "0.12", features = ["nightly"] }
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+rustc-hash = "1.1"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = 3

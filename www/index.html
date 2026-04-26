@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>OxiDD WASM Demo</title>
+  <style>
+    body { font-family: monospace; max-width: 70ch; margin: 2rem auto; padding: 0 1rem; }
+    pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; }
+    #output { white-space: pre-wrap; }
+    .error { color: red; }
+    header p { color: #555; }
+    header a { color: #0366d6; }
+  </style>
+  <!--
+    coi-serviceworker installs COOP/COEP headers client-side so that
+    SharedArrayBuffer is available when we're served from a static host
+    (like GitHub Pages) that can't set these headers directly.
+    Must run before any module script that needs SharedArrayBuffer.
+  -->
+  <script src="coi-serviceworker.js"></script>
+</head>
+<body>
+  <header>
+    <h1>OxiDD WASM Demo</h1>
+    <p>
+      Binary Decision Diagrams in the browser via WebAssembly and rayon threading.
+      <a href="https://github.com/rndmcnlly/oxidd-wasm">Source on GitHub</a>.
+    </p>
+  </header>
+  <div id="output"></div>
+  <script type="module" src="index.js"></script>
+</body>
+</html>
