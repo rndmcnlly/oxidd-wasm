@@ -11,19 +11,13 @@
     header p { color: #555; }
     header a { color: #0366d6; }
   </style>
-  <!--
-    coi-serviceworker installs COOP/COEP headers client-side so that
-    SharedArrayBuffer is available when we're served from a static host
-    (like GitHub Pages) that can't set these headers directly.
-    Must run before any module script that needs SharedArrayBuffer.
-  -->
-  <script src="coi-serviceworker.js"></script>
 </head>
 <body>
   <header>
     <h1>OxiDD WASM Demo</h1>
     <p>
-      Binary Decision Diagrams in the browser via WebAssembly and rayon threading.
+      Binary Decision Diagrams in the browser via WebAssembly (single-threaded,
+      no SharedArrayBuffer required).
       <a href="https://github.com/rndmcnlly/oxidd-wasm">Source on GitHub</a>.
     </p>
     <p>

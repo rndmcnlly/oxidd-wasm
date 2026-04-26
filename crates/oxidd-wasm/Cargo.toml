@@ -10,20 +10,21 @@ repository = "https://github.com/rndmcnlly/oxidd-wasm"
 crate-type = ["cdylib"]
 
 [dependencies]
+# No `multi-threading` feature: apply recursion stays serial.
+# Parallelism in the browser was a net negative for our workloads
+# (see README's profile-diagnosed postmortem), and dropping the
+# feature also drops the `wasm-bindgen-rayon` / SharedArrayBuffer
+# / crossOriginIsolated / nightly-Rust / shared-memory chain.
 oxidd = { path = "../../vendor/oxidd/crates/oxidd", features = [
   "manager-index",
   "bdd",
   "bcdd",
   "zbdd",
-  "multi-threading",
   "apply-cache-direct-mapped",
 ], default-features = false }
 oxidd-core = { path = "../../vendor/oxidd/crates/oxidd-core" }
 
 wasm-bindgen = "0.2"
-wasm-bindgen-rayon = { version = "1.2", features = ["no-bundler"] }
-rayon = "1.10"
-parking_lot = { version = "0.12", features = ["nightly"] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
 rustc-hash = "1.1"
@@ -33,3 +34,28 @@ panic = "abort"
 codegen-units = 1
 lto = true
 opt-level = 3
+
+# `cargo build --profile profiling` (or wasm-pack build --profiling):
+# release-level optimizations but with DWARF debuginfo preserved, so
+# Chrome DevTools can resolve wasm-function[NNN] to real Rust symbols
+# and show source lines. Costs ~3-5x larger .wasm files. Don't ship
+# these to Pages.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+# opt-level = 2 so inlining doesn't collapse too many function
+# boundaries; otherwise flamegraphs show huge merged frames that are
+# hard to interpret.
+opt-level = 2
+# lto = false so cross-crate inlining doesn't inflate compile time
+# and also loses fewer symbols. release already sets lto = true.
+lto = false
+codegen-units = 16
+
+[package.metadata.wasm-pack.profile.profiling]
+# Skip wasm-opt entirely. Its default passes strip DWARF even with
+# --debuginfo, and we don't care about size in a profiling build.
+# Keeping the raw Rust+LLD output preserves the richest debug info
+# for Chrome DevTools to consume.
+wasm-opt = false

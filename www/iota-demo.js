@@ -141,31 +141,20 @@ async function demoReachOnContext(ctx, bits) {
 
 // ---------- Scaling: x*y=z at several widths ----------
 
-async function runMultRelation(client, bits, threads, splitDepth = null) {
+async function runMultRelation(client, bits) {
   // Size the manager to the workload. The multiplication relation's
-  // final BDD grows ~2.7× per bit (canonical Bryant exponential blowup).
-  // Peak node count during bitblasting is higher than final; for a
-  // parallel manager the peak is higher still because multiple rayon
-  // tasks each hold intermediate BDDs alive concurrently.
-  //
-  // Native measurements of the FINAL relation size:
+  // final BDD grows ~2.72x per bit (canonical Bryant exponential
+  // blowup). Peak node count during bitblasting is higher than final,
+  // roughly 5x for single-threaded execution. Native measurements of
+  // the FINAL relation size:
   //   k=10: 194k nodes     k=12: 1.4M     k=13: 3.9M     k=14: ~10M
-  //
-  // Rough peak multipliers I've observed: ~5× final for single-thread,
-  // ~8-12× for 16-thread with non-zero split_depth. Empirical table
-  // below targets "peak that avoids 'AND: oom' errors".
   const peakEstimate = (() => {
-    // Bryant exponent table (final-size only), bits -> nodes,
-    // measured on our native Rust test suite:
     const finalTable = {
       5: 1.3e3, 6: 3.5e3, 7: 1.0e4, 8: 2.7e4, 9: 7.1e4,
       10: 2.0e5, 11: 5.2e5, 12: 1.4e6, 13: 3.9e6, 14: 1.1e7,
     };
     const finalNodes = finalTable[bits] ?? Math.pow(2.72, bits);
-    // Bigger multiplier for multi-threaded runs: parallel apply keeps
-    // more intermediates alive at once.
-    const peakMultiplier = threads > 1 ? 8 : 5;
-    return Math.ceil(finalNodes * peakMultiplier);
+    return Math.ceil(finalNodes * 5);
   })();
   // Cap at 1<<26 (~67M nodes, ~1 GiB of slots) within the 4 GiB wasm32
   // linear-memory ceiling. Beyond that the Edge type (32-bit index)
@@ -173,9 +162,8 @@ async function runMultRelation(client, bits, threads, splitDepth = null) {
   const nodeBudget = Math.max(1 << 14, Math.min(1 << 26, peakEstimate));
   const cacheBudget = nodeBudget >>> 2;
   const ctx = await Context.fromClient(client, {
-    innerCap: nodeBudget, cacheCap: cacheBudget, threads,
+    innerCap: nodeBudget, cacheCap: cacheBudget,
   });
-  if (splitDepth !== null) await ctx.setSplitDepth(splitDepth);
   await ctx.declareUint("x", bits);
   await ctx.declareUint("y", bits);
   await ctx.declareUint("z", bits);
@@ -207,72 +195,58 @@ async function runMultRelation(client, bits, threads, splitDepth = null) {
 }
 
 async function main() {
-  // Cap the mt pool at 4 threads. More workers = more per-thread stack
-  // reserved in the shared 1 GiB of Wasm linear memory (each one is
-  // 8 MiB), which is space that can't hold BDD nodes. At 16 threads we
-  // lose 128 MiB to stacks alone, and apply-scaling gains are modest
-  // in the browser anyway due to Web Worker scheduling overhead.
-  const hw = Math.min(navigator.hardwareConcurrency || 1, 4);
   log(`iota demo — batched command buffers`);
-  log(`  hardware threads:  ${navigator.hardwareConcurrency || 1} (using ${hw})`);
-  log(`  SharedArrayBuffer: ${typeof SharedArrayBuffer !== "undefined"}`);
+  log(`  single-threaded wasm (no SharedArrayBuffer required)`);
 
-  log("\nSpinning up single-threaded client...");
-  const stClient = new Client();
-  await stClient.loaded;
-  await stClient.init(1);
+  log("\nSpinning up client...");
+  const client = new Client();
+  await client.loaded;
+  await client.init();
 
   // Correctness.
-  const selfTestCtx = await Context.fromClient(stClient, { innerCap: 1 << 18, cacheCap: 1 << 16, threads: 1 });
+  const selfTestCtx = await Context.fromClient(client, { innerCap: 1 << 18, cacheCap: 1 << 16 });
   log("");
   await demoArithSelfTest(selfTestCtx, 4);
 
   // Illustrative transition-system demo.
-  const reachCtx = await Context.fromClient(stClient, { innerCap: 1 << 20, cacheCap: 1 << 18, threads: 1 });
+  const reachCtx = await Context.fromClient(client, { innerCap: 1 << 20, cacheCap: 1 << 18 });
   await demoReachOnContext(reachCtx, 5);
 
   // Correctness demos done. Release the worker so the scaling sweep
   // starts from clean Wasm memory.
-  stClient.terminate();
+  client.terminate();
 
-  // For the scaling sweep we spawn a fresh Client per (threads, k)
-  // configuration. Wasm linear memory only ever grows: a Context.close()
-  // frees the node table's slots but not the Wasm pages backing it, so
-  // a sequential sweep accumulates peak-sized allocations across
+  // For the scaling sweep we spawn a fresh Client per k. Wasm linear
+  // memory only ever grows: a Context.close() frees slots in the
+  // manager's node table but not the Wasm pages backing it, so a
+  // sequential sweep accumulates peak-sized allocations across
   // iterations and eventually OOMs. Spinning up a fresh worker gives
   // each k a clean slate.
-  const makeClient = async (numThreads) => {
+  const makeClient = async () => {
     const c = new Client();
     await c.loaded;
-    await c.init(numThreads);
+    await c.init();
     return c;
   };
 
-  // Scaling demo with split-depth tuning. oxidd's default split_depth
-  // is log2(4096 * num_threads): at 4 threads, = 14. apply ops spawn
-  // parallel tasks for the first 14 levels of recursion, which is too
-  // aggressive for the browser's task-overhead profile. We sweep
-  // smaller depths to find a better sweet spot.
   log("\n=== Scaling demo: x * y = z ===");
-  log(`  st = single-threaded; mt(d) = ${hw} threads with split_depth=d`);
-  log(`  (oxidd's default split_depth for ${hw} threads is log2(4096*${hw}) = ${Math.log2(4096 * hw).toFixed(0)})`);
+  log("  (the multiplication relation is the canonical BDD worst case:");
+  log("   Bryant 1986 showed it grows ~2.7x per input bit regardless of");
+  log("   variable ordering)");
 
-  const depths = hw > 1 ? [0, 4] : [];
   const header = [
     "k".padStart(2),
     "nodes".padStart(10),
     "MiB".padStart(6),
-    "st(ms)".padStart(9),
-    ...depths.map((d) => `mt(${d})ms`.padStart(10)),
-    "best-mt".padStart(8),
-    "speedup".padStart(7),
+    "ir(ms)".padStart(8),
+    "submit(ms)".padStart(11),
+    "sat(ms)".padStart(9),
+    "total(ms)".padStart(10),
     "result",
   ].join("  ");
   log(header);
 
-  // Run each configuration with a try/catch so one blowup (OOM, stack
-  // overflow on pathological split-depth combos, etc.) doesn't abort
-  // the whole sweep. Failures are rendered as "ERR".
+  // Run each k with a try/catch so one blowup doesn't abort the sweep.
   const runSafe = async (label, fn) => {
     try {
       return { kind: "ok", value: await fn() };
@@ -283,43 +257,22 @@ async function main() {
   };
 
   for (const k of [7, 10, 12, 13, 14]) {
-    // Fresh st client per k so Wasm memory from prior (large) iterations
-    // doesn't starve this one.
-    const stClientK = await makeClient(1);
-    const stR = await runSafe(`st k=${k}`, () => runMultRelation(stClientK, k, 1));
-    stClientK.terminate();
+    const c = await makeClient();
+    const r = await runSafe(`k=${k}`, () => runMultRelation(c, k));
+    c.terminate();
 
-    const mtRs = [];
-    if (hw > 1) {
-      for (const d of depths) {
-        const mtClientK = await makeClient(hw);
-        mtRs.push({
-          d,
-          r: await runSafe(`mt(${d}) k=${k}`, () => runMultRelation(mtClientK, k, hw, d)),
-        });
-        mtClientK.terminate();
-      }
-    }
-
-    const stCell = stR.kind === "ok" ? stR.value.totalMs.toFixed(1) : "ERR";
-    const stNodes = stR.kind === "ok" ? String(stR.value.nodes) : "-";
-    const stMiB = stR.kind === "ok" ? (stR.value.nodes * 16 / (1024 * 1024)).toFixed(1) : "-";
-    const stOk = stR.kind === "ok" && stR.value.ok;
-
-    const mtCells = mtRs.map(({ r }) => r.kind === "ok" ? r.value.totalMs.toFixed(1) : "ERR");
-    const mtOkTimes = mtRs.filter(({ r }) => r.kind === "ok" && r.value.ok).map(({ r }) => r.value.totalMs);
-    const bestMt = mtOkTimes.length ? Math.min(...mtOkTimes) : null;
-
-    const allOk = stOk && mtRs.every(({ r }) => r.kind === "ok" && r.value.ok);
+    if (r.kind !== "ok") continue;
+    const v = r.value;
+    const miB = (v.nodes * 16 / (1024 * 1024)).toFixed(1);
     const row = [
       String(k).padStart(2),
-      stNodes.padStart(10),
-      stMiB.padStart(6),
-      stCell.padStart(9),
-      ...mtCells.map((c) => c.padStart(10)),
-      bestMt !== null ? bestMt.toFixed(1).padStart(8) : "-".padStart(8),
-      (bestMt !== null && stR.kind === "ok") ? (stR.value.totalMs / bestMt).toFixed(2).padStart(7) : "-".padStart(7),
-      allOk ? "PASS" : (stOk || mtOkTimes.length > 0) ? "partial" : "FAIL",
+      String(v.nodes).padStart(10),
+      miB.padStart(6),
+      v.buildIrMs.toFixed(1).padStart(8),
+      v.submitMs.toFixed(1).padStart(11),
+      v.countMs.toFixed(1).padStart(9),
+      v.totalMs.toFixed(1).padStart(10),
+      v.ok ? "PASS" : "FAIL",
     ];
     log(row.join("  "));
   }

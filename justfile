@@ -11,21 +11,30 @@ set shell := ["bash", "-c"]
 WASM_CRATE := "crates/oxidd-wasm"
 OUT_DIR := "../../www/pkg"
 
-RUSTFLAGS := "-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--import-memory -C link-arg=--shared-memory -C link-arg=--max-memory=4294967296 -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=-zstack-size=8388608"
+RUSTFLAGS := "-C link-arg=--import-memory -C link-arg=--max-memory=4294967296 -C link-arg=-zstack-size=8388608"
 
-# Build WASM (release by default; pass --dev for debug)
+# Build WASM (release by default; pass --dev for debug). Stable Rust:
+# we no longer need nightly because we dropped `parking_lot/nightly`
+# and `-Z build-std` (the latter was only needed for wasm-bindgen-rayon's
+# shared-memory atomics).
 build *FLAGS:
     export PATH="$HOME/.cargo/bin:$PATH"
     export RUSTFLAGS='{{RUSTFLAGS}}'
     wasm-pack build {{WASM_CRATE}} \
       --target web \
       --out-dir {{OUT_DIR}} \
-      {{FLAGS}} \
-      -- -Z build-std=panic_abort,std
+      {{FLAGS}}
 
 build-release: (build "--release")
 
 build-dev: (build "--dev")
+
+# Build with release-level optimizations + DWARF debuginfo so Chrome
+# DevTools can symbolicate wasm-function[NNN] back to Rust. Use this
+# for profiling; don't ship to Pages (files are ~3-5x larger).
+# Requires Chrome "WebAssembly Debugging: Enable DWARF support"
+# experiment (chrome://flags/#enable-webassembly-debugging).
+build-profiling: (build "--profiling")
 
 # Start the demo server with COOP/COEP headers
 serve PORT="8080": build-release

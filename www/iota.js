@@ -17,9 +17,8 @@
 // This mirrors the evolution of graphics APIs from immediate-mode GL
 // calls (one round-trip per primitive, caller-bottlenecked) to command
 // buffers (Vulkan, Metal, D3D12): the engine receives the whole frame's
-// work, sees all available parallelism, and hides the boundary latency.
-// Our "frames" are algebraic expressions; our "GPU" is oxidd in a
-// Web Worker with rayon threads.
+// work and hides the boundary latency.  Our "frames" are algebraic
+// expressions; our "GPU" is oxidd in a single Web Worker.
 //
 // Division of labor:
 //   - JS side (this file): typed variable declaration, bitblaster that
@@ -27,6 +26,12 @@
 //   - Rust side (oxidd-wasm/src/lib.rs): CommandBuffer executor that
 //     walks the IR once, calls oxidd, and materializes only the caller's
 //     requested outputs.
+//
+// There's no worker pool: a Client owns exactly one Web Worker, which
+// owns one Wasm module instance. Parallel rayon execution inside Wasm
+// did not produce speedup on browser workloads (see README's postmortem);
+// removing it dropped the SharedArrayBuffer / crossOriginIsolated /
+// nightly-Rust requirements.
 
 // ---------------------------------------------------------------------------
 // RPC client
@@ -71,9 +76,12 @@ export class Client {
     });
   }
 
-  async init(numThreads) {
+  /// Initialize the worker's Wasm module. The `_numThreads` parameter
+  /// is accepted for backward compatibility but ignored; the worker
+  /// always runs single-threaded.
+  async init(_numThreads) {
     await this.loaded;
-    return this.call("__init__", { numThreads });
+    return this.call("__init__", {});
   }
 
   _enqueueFree(handle) {
@@ -96,8 +104,8 @@ export class Client {
     this._registry.register(obj, handle);
   }
 
-  /// Tear down the worker and its rayon pool. The worker's linear
-  /// memory is released along with the worker itself; a subsequent
+  /// Tear down the worker and its Wasm instance. Releases all
+  /// linear-memory pages the worker had grown; a subsequent
   /// `new Client()` starts from a fresh Wasm instance. This is the
   /// only reliable way to shrink Wasm memory in the browser, since
   /// dropping a manager frees slots in the node table but never
@@ -235,18 +243,17 @@ export class Context {
   }
 
   static async create({
-    threads = navigator.hardwareConcurrency || 4,
     innerCap = 1 << 22,
     cacheCap = 1 << 20,
   } = {}) {
     const client = new Client();
     await client.loaded;
-    await client.init(threads);
-    return Context.fromClient(client, { innerCap, cacheCap, threads });
+    await client.init();
+    return Context.fromClient(client, { innerCap, cacheCap });
   }
 
-  static async fromClient(client, { innerCap = 1 << 22, cacheCap = 1 << 20, threads = 0 } = {}) {
-    const mgr = await client.call("mgrNew", { innerCap, cacheCap, threads });
+  static async fromClient(client, { innerCap = 1 << 22, cacheCap = 1 << 20 } = {}) {
+    const mgr = await client.call("mgrNew", { innerCap, cacheCap, threads: 1 });
     return new Context(client, mgr);
   }
 
@@ -262,18 +269,6 @@ export class Context {
   async numVars() { return this._c.call("mgrNumVars", { mgr: this._mgr }); }
   async numInnerNodes() { return this._c.call("mgrNumInnerNodes", { mgr: this._mgr }); }
   async gc() { return this._c.call("mgrGc", { mgr: this._mgr }); }
-
-  /// Current recursion split depth (oxidd's heuristic default is usually
-  /// too aggressive for the browser; see `setSplitDepth`).
-  async splitDepth() { return this._c.call("mgrSplitDepth", { mgr: this._mgr }); }
-
-  /// Tune the recursion depth at which BDD apply operations split into
-  /// parallel rayon tasks. Pass `null` for oxidd's default,
-  /// `0` to disable parallelism, or a small value like 3-6 to reduce
-  /// task overhead for small-to-medium workloads.
-  async setSplitDepth(depth) {
-    return this._c.call("mgrSetSplitDepth", { mgr: this._mgr, depth });
-  }
 
   // -- Declaration ----------------------------------------------------------
 

@@ -1,7 +1,7 @@
 // Manager worker. All oxidd operations happen here.
 // We import the wasm-bindgen glue as an ES module.
 
-import init, { initThreadPool, setPanicHook, BDDManager, SubstitutionBuilder, CommandBuffer } from "./pkg/oxidd_wasm.js";
+import init, { setPanicHook, BDDManager, SubstitutionBuilder, CommandBuffer } from "./pkg/oxidd_wasm.js";
 
 // Object registry: maps handle id -> live Rust object (BDDManager or BDD).
 // Handles are small integers that main thread uses to refer to Rust objects.
@@ -46,14 +46,6 @@ const dispatch = {
   },
   mgrGc({ mgr }) {
     return get(mgr).gc();
-  },
-  mgrSplitDepth({ mgr }) {
-    return get(mgr).split_depth();
-  },
-  mgrSetSplitDepth({ mgr, depth }) {
-    // `depth` is null (for oxidd default) or a u32 (including 0 to disable parallelism).
-    get(mgr).set_split_depth(depth === null ? undefined : depth);
-    return true;
   },
   mgrVar({ mgr, varNo }) {
     return register(get(mgr).var(varNo));
@@ -182,10 +174,9 @@ const dispatch = {
 let ready = false;
 let pendingInit = null;
 
-async function bootstrap(numThreads) {
+async function bootstrap() {
   await init();
   setPanicHook();
-  await initThreadPool(numThreads);
   ready = true;
 }
 
@@ -193,9 +184,9 @@ self.addEventListener("message", async (ev) => {
   const { id, method, args } = ev.data;
   try {
     if (method === "__init__") {
-      pendingInit = bootstrap(args.numThreads);
+      pendingInit = bootstrap();
       await pendingInit;
-      self.postMessage({ id, ok: true, result: { numThreads: args.numThreads } });
+      self.postMessage({ id, ok: true, result: { numThreads: 1 } });
       return;
     }
     if (!ready) {

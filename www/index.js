@@ -45,14 +45,14 @@ class OxiddClient {
     });
   }
 
-  async init(numThreads) {
+  async init() {
     await this.loaded;
-    return this.call("__init__", { numThreads });
+    return this.call("__init__", {});
   }
 
   // --- Manager construction returns a Manager facade ---
-  async newManager(innerCap, cacheCap, threads) {
-    const mgr = await this.call("mgrNew", { innerCap, cacheCap, threads });
+  async newManager(innerCap, cacheCap) {
+    const mgr = await this.call("mgrNew", { innerCap, cacheCap, threads: 1 });
     return new Manager(this, mgr);
   }
 }
@@ -105,12 +105,12 @@ async function main() {
   await client.loaded;
   log("Worker loaded.");
 
-  log(`Initializing (threads: ${navigator.hardwareConcurrency})...`);
-  const initResult = await client.init(navigator.hardwareConcurrency);
-  log(`Worker ready: ${initResult.numThreads} rayon threads`);
+  log(`Initializing...`);
+  await client.init();
+  log(`Worker ready (single-threaded wasm)`);
 
   log("\n--- BDD Demo: (x0 AND x1) OR x2 ---\n");
-  const mgr = await client.newManager(65536, 65536, navigator.hardwareConcurrency);
+  const mgr = await client.newManager(65536, 65536);
   log(`Created BDDManager`);
 
   const vars = await mgr.addVars(3);
@@ -131,7 +131,7 @@ async function main() {
 
   log("\n--- N-queens (n=8) via BDD ---\n");
   const n = 8;
-  const qmgr = await client.newManager(1 << 22, 1 << 20, navigator.hardwareConcurrency);
+  const qmgr = await client.newManager(1 << 22, 1 << 20);
   const qvarsFlat = await qmgr.addVars(n * n);
 
   const idx = (r, c) => r * n + c;

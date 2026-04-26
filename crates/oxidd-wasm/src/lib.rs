@@ -2,10 +2,9 @@
 
 use oxidd::bdd::{BDDFunction, BDDManagerRef};
 use oxidd::{
-    BooleanFunction, BooleanFunctionQuant, Function, HasLevel, HasWorkers, InnerNode, LevelNo,
+    BooleanFunction, BooleanFunctionQuant, Function, HasLevel, InnerNode, LevelNo,
     Manager, ManagerRef, Node, VarNo,
 };
-use oxidd_core::WorkerPool;
 use oxidd::util::num::F64;
 use oxidd::Subst;
 use oxidd_core::function::FunctionSubst;
@@ -14,8 +13,6 @@ use std::collections::HashSet;
 use std::hash::BuildHasherDefault;
 use rustc_hash::FxHasher;
 use wasm_bindgen::prelude::*;
-
-pub use wasm_bindgen_rayon::init_thread_pool;
 
 #[wasm_bindgen(js_name = "setPanicHook")]
 pub fn set_panic_hook() {
@@ -33,10 +30,14 @@ pub struct BDDManager {
 
 #[wasm_bindgen]
 impl BDDManager {
+    /// Construct a new BDD manager. `threads` is ignored on wasm32 (always
+    /// single-threaded) and retained in the signature only for API
+    /// compatibility with oxidd's native constructor.
     #[wasm_bindgen(constructor)]
     pub fn new(inner_node_capacity: usize, apply_cache_capacity: usize, threads: u32) -> Self {
+        let _ = threads;
         Self {
-            inner: oxidd::bdd::new_manager(inner_node_capacity, apply_cache_capacity, threads),
+            inner: oxidd::bdd::new_manager(inner_node_capacity, apply_cache_capacity, 1),
         }
     }
 
@@ -58,22 +59,6 @@ impl BDDManager {
 
     pub fn gc(&self) -> usize {
         self.inner.with_manager_shared(|m| m.gc())
-    }
-
-    /// Current recursion split depth. See `set_split_depth`.
-    pub fn split_depth(&self) -> u32 {
-        self.inner.with_manager_shared(|m| m.workers().split_depth())
-    }
-
-    /// Set the recursion depth up to which BDD apply operations split into
-    /// parallel tasks (via `rayon::join`). Pass `None` to restore oxidd's
-    /// default of `log2(4096 * num_threads)`, which is aggressive and often
-    /// pessimal in the browser where task overhead is higher than on native.
-    /// Pass `Some(0)` to disable parallelism entirely (fully serial apply).
-    /// Tune smaller values (e.g., 3-6) to find the sweet spot for your
-    /// workload.
-    pub fn set_split_depth(&self, depth: Option<u32>) {
-        self.inner.with_manager_shared(|m| m.workers().set_split_depth(depth));
     }
 
     pub fn var(&self, var_no: u32) -> Result<BDD, JsValue> {
