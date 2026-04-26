@@ -11,7 +11,7 @@ set shell := ["bash", "-c"]
 WASM_CRATE := "crates/oxidd-wasm"
 OUT_DIR := "../../www/pkg"
 
-RUSTFLAGS := "-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--import-memory -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base"
+RUSTFLAGS := "-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--import-memory -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=-zstack-size=8388608"
 
 # Build WASM (release by default; pass --dev for debug)
 build *FLAGS:

@@ -2,7 +2,10 @@
 
 WebAssembly bindings for [OxiDD](https://github.com/oxidd/oxidd), exposing Binary Decision Diagrams to JavaScript with multi-threaded rayon execution via shared memory.
 
-**[Live demo](https://rndmcnlly.github.io/oxidd-wasm/)** (requires a browser with `SharedArrayBuffer` support: Chrome, Firefox, Safari 16.4+).
+**Live demos** (require a browser with `SharedArrayBuffer` support: Chrome, Firefox, Safari 16.4+):
+
+- **[oxidd-wasm](https://rndmcnlly.github.io/oxidd-wasm/)**: raw BDD primitives, 8-queens example.
+- **[iota](https://rndmcnlly.github.io/oxidd-wasm/iota.html)**: typed symbolic programming built on top (uints, bools, primed variables, reachability).
 
 ## What this is
 
@@ -91,6 +94,46 @@ console.log(await expr.satCount(2));  // 3
 
 Every BDD operation is one postMessage round-trip, so latency-bound workloads will benefit from batching. This is left as a future optimization.
 
+## iota: typed symbolic programming
+
+`www/iota.js` is a higher-level layer inspired by [`omega.symbolic.fol`](https://github.com/tulip-control/omega): typed unsigned integers, booleans, primed counterparts for transition systems, a bitblaster that compiles expressions like `x * y = z` into BDD operations, and fused operations like `image` and `preimage` that live Rust-side to avoid postMessage storms.
+
+```js
+import { Context } from "./iota.js";
+
+const ctx = await Context.create({ threads: navigator.hardwareConcurrency });
+
+await ctx.declareUint("x", 8);
+await ctx.declareUint("y", 8);
+await ctx.declareUint("z", 8);
+
+const u = await ctx.eq(await ctx.mul("x", "y"), "z");
+console.log(await u.satCount(await ctx.numVars()));    // 65536
+
+// Transition systems
+await ctx.declarePrimed(["x"]);
+const xBits     = await ctx.bits("x");
+const xPrime    = await ctx.bits("x'");
+const xPlus1    = await ctx.addBits(xBits, await ctx.uintLit(1, 8));
+const trans     = await ctx.eqBits(xPrime, xPlus1);
+
+// Fixpoint stays in JS (visible, interruptible); image is one FFI call.
+const qX        = await ctx.qcube(["x"]);
+const subst     = await ctx.primedToUnprimed(["x"]);
+let reached     = await ctx.eqBits(xBits, await ctx.uintLit(0, 8));
+let frontier    = reached;
+while (true) {
+  const next      = await frontier.image(trans, qX, subst);
+  const newStates = await next.and(await reached.not());
+  if (!await newStates.satisfiable()) break;
+  reached  = await reached.or(next);
+  frontier = newStates;
+}
+console.log(await reached.satCount(8));                // 256
+```
+
+Design split: heavyweight traversals (`support`, `pick_cube`, `cube`, `image`, `preimage`, `substitute`) live in Rust as single FFI hops; the bitblaster and the fixpoint loop stay in JS where they're readable and interruptible. BDD handles are auto-freed via a `FinalizationRegistry` that batches drops across microtasks.
+
 ## Notable build flags
 
 For reference (and for anyone trying to replicate this), the working set of `RUSTFLAGS` is:
@@ -104,9 +147,12 @@ For reference (and for anyone trying to replicate this), the working set of `RUS
 -C link-arg=--export=__tls_size
 -C link-arg=--export=__tls_align
 -C link-arg=--export=__tls_base
+-C link-arg=-zstack-size=8388608
 ```
 
 The `--export=__wasm_init_tls` et al are required after [rust-lang/rust#147225](https://github.com/rust-lang/rust/pull/147225) (landed late 2025), which stopped rustc from auto-exporting these for shared-memory WASM. Without them, `wasm-bindgen`'s threading transform panics with `failed to find __wasm_init_tls`.
+
+The `-zstack-size=8388608` (8 MiB) bumps the per-worker stack from its 1 MiB default. Rust targeting WASM uses noticeably more stack per frame than native x86_64 due to the linear-memory calling convention, and BDD apply/cofactor walks recurse deeply on the order of the number of variables in the function. 8 MiB is enough to comfortably handle ten-bit multiplication relations (~30 levels) with room to spare.
 
 ## License
 
