@@ -22,32 +22,22 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Rust nightly
+      - name: Install Rust stable
         run: |
-          rustup toolchain install nightly --component rust-src
-          rustup target add wasm32-unknown-unknown --toolchain nightly
-          rustup override set nightly
+          rustup toolchain install stable
+          rustup target add wasm32-unknown-unknown --toolchain stable
+          rustup override set stable
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      # Build via justfile so deployment RUSTFLAGS (max-memory etc.)
+      # stay in lockstep with local builds. No separate copy here.
       - name: Build WASM
-        env:
-          RUSTFLAGS: >
-            -C target-feature=+atomics,+bulk-memory,+mutable-globals
-            -C link-arg=--import-memory
-            -C link-arg=--shared-memory
-            -C link-arg=--max-memory=1073741824
-            -C link-arg=--export=__wasm_init_tls
-            -C link-arg=--export=__tls_size
-            -C link-arg=--export=__tls_align
-            -C link-arg=--export=__tls_base
-        run: |
-          wasm-pack build crates/oxidd-wasm \
-            --target web \
-            --out-dir ../../www/pkg \
-            --release \
-            -- -Z build-std=panic_abort,std
+        run: just build-release
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
