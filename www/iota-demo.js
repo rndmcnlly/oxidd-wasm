@@ -148,10 +148,13 @@ async function runMultRelation(client, bits) {
   // roughly 5x for single-threaded execution. Native measurements of
   // the FINAL relation size:
   //   k=10: 194k nodes     k=12: 1.4M     k=13: 3.9M     k=14: ~10M
+  //   k=15: 10.3M (measured in browser)    k=16: ~29M (extrapolated 2.79x/bit)
   const peakEstimate = (() => {
     const finalTable = {
       5: 1.3e3, 6: 3.5e3, 7: 1.0e4, 8: 2.7e4, 9: 7.1e4,
       10: 2.0e5, 11: 5.2e5, 12: 1.4e6, 13: 3.9e6, 14: 1.1e7,
+      15: 1.0e7,
+      16: 2.9e7,
     };
     const finalNodes = finalTable[bits] ?? Math.pow(2.72, bits);
     return Math.ceil(finalNodes * 5);
@@ -256,7 +259,12 @@ async function main() {
     }
   };
 
-  for (const k of [7, 10, 12, 13, 14]) {
+  // Earlier k=16 failed with an infallible-alloc panic during
+  // sat_count's cache rehash (the HashMap doubling briefly held both
+  // old and new tables, blowing the 4 GiB wasm32 ceiling). We now
+  // pre-size the SatCountCache to the exact node count, eliminating
+  // the rehash. k=16 typically produces ~27-30M nodes.
+  for (const k of [7, 10, 12, 13, 14, 15, 16]) {
     const c = await makeClient();
     const r = await runSafe(`k=${k}`, () => runMultRelation(c, k));
     c.terminate();

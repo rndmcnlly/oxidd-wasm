@@ -19,6 +19,28 @@ pub fn set_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
+/// Construct a `SatCountCache` whose internal `HashMap` is pre-sized
+/// to hold approximately `n_nodes` entries without rehashing. The
+/// rehash itself is the memory problem on wasm32: `HashMap` doubles
+/// its table on growth, so at the last step before fitting `N` entries
+/// it allocates a new table of size `2N` while still holding the old
+/// one, briefly requiring `~3N` bucket slots. For `N` around 30M this
+/// pushes the heap past 4 GiB.
+///
+/// We over-allocate slightly: `HashMap::with_capacity(n)` guarantees
+/// `n` entries fit without resizing, but hashbrown internally picks
+/// a power-of-two table sized to ~`n / 0.875` ≈ `1.14·n` buckets.
+/// Memory cost for `n_nodes = 30M`: ~34M × (24 bytes/entry) ≈ 820 MiB,
+/// which is deterministic and fits comfortably below the 4 GiB ceiling
+/// alongside the BDD arena.
+fn presized_sat_cache(
+    n_nodes: usize,
+) -> SatCountCache<F64, BuildHasherDefault<FxHasher>> {
+    let mut cache = SatCountCache::<F64, BuildHasherDefault<FxHasher>>::default();
+    cache.map.reserve(n_nodes);
+    cache
+}
+
 // ---------------------------------------------------------------------------
 // Manager
 // ---------------------------------------------------------------------------
@@ -213,8 +235,23 @@ impl BDD {
         self.inner == other.inner
     }
 
+    /// Satisfying-assignment count for this BDD over `num_vars` variables.
+    ///
+    /// Uses oxidd's recursive `sat_count`, but first pre-sizes the
+    /// `SatCountCache`'s `HashMap` to hold exactly one entry per BDD node.
+    /// This is not cosmetic: the default `HashMap::default()` grows by
+    /// doubling, which means during the last rehash we briefly hold both
+    /// the old and new tables. At k=16 of the multiplication relation
+    /// (~30M nodes) that doubling pushes total heap past the 4 GiB
+    /// wasm32 ceiling and OOMs via infallible-alloc panic. Pre-sizing
+    /// to the exact count eliminates the spike.
+    ///
+    /// Cost: one extra DAG traversal via `node_count`. That traversal
+    /// has lower memory pressure than `sat_count` (a `HashSet<NodeID>`
+    /// stores u32-sized keys, no value) and doesn't blow up the same way.
     pub fn sat_count(&self, num_vars: u32) -> f64 {
-        let mut cache = SatCountCache::<F64, BuildHasherDefault<FxHasher>>::default();
+        let n_nodes = self.inner.node_count();
+        let mut cache = presized_sat_cache(n_nodes);
         self.inner.sat_count(num_vars as LevelNo, &mut cache).0
     }
 
@@ -226,7 +263,8 @@ impl BDD {
         if n_care > total {
             return Err(JsValue::from_str("count_with_nvars: n_care > total"));
         }
-        let mut cache = SatCountCache::<F64, BuildHasherDefault<FxHasher>>::default();
+        let n_nodes = self.inner.node_count();
+        let mut cache = presized_sat_cache(n_nodes);
         let full = self.inner.sat_count(total as LevelNo, &mut cache).0;
         let shift = total - n_care;
         Ok(full / (1u64 << shift) as f64)

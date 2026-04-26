@@ -5,7 +5,7 @@ WebAssembly bindings for [OxiDD](https://github.com/oxidd/oxidd), exposing Binar
 **Live demos:**
 
 - **[oxidd-wasm](https://rndmcnlly.github.io/oxidd-wasm/)**: raw BDD primitives, 8-queens example.
-- **[iota](https://rndmcnlly.github.io/oxidd-wasm/iota.html)**: typed symbolic programming built on top (uints, bools, primed variables, reachability, mult-relation scaling up to k=14).
+- **[iota](https://rndmcnlly.github.io/oxidd-wasm/iota.html)**: typed symbolic programming built on top (uints, bools, primed variables, reachability, mult-relation scaling up to k=16).
 
 ## What this is
 
@@ -122,8 +122,14 @@ The resulting Wasm module is about 45% smaller (162 KB vs 294 KB), deploys to an
 -C link-arg=-zstack-size=8388608
 ```
 
-- `--max-memory=4294967296` is the wasm32 ceiling (4 GiB). The multiplication relation at k=14 produces ~4M final nodes × 16 B = 56 MiB, but peak during bitblasting plus accumulated slot-table growth pushes a sequential k=7..14 sweep well past 1 GiB.
-- `-zstack-size=8388608` (8 MiB) bumps the Wasm stack from the linker default of 1 MiB. Rust targeting wasm32 uses several times more stack per frame than native x86_64 due to the linear-memory calling convention; deep BDD apply recursion at k=14 can reach around 50 levels, each with significant intermediate-BDD bookkeeping.
+- `--max-memory=4294967296` is the wasm32 ceiling (4 GiB). The multiplication relation at k=15 produces ~10M final nodes × 16 B = 157 MiB, but peak during bitblasting plus accumulated slot-table growth pushes a sequential k=7..15 sweep well past 1 GiB.
+- `-zstack-size=8388608` (8 MiB) bumps the Wasm stack from the linker default of 1 MiB. Rust targeting wasm32 uses several times more stack per frame than native x86_64 due to the linear-memory calling convention; deep BDD apply recursion during bitblasting can reach several dozen frames, each with intermediate-BDD bookkeeping.
+
+### Pre-sized sat_count cache
+
+At k=16 the multiplication-relation apply completes fine, but validation (`sat_count`) used to OOM. The cause: oxidd's `SatCountCache` is a `HashMap<NodeID, f64>` that grows by doubling. The final rehash before reaching ~30M entries briefly holds both the old (32M-bucket) and new (64M-bucket) tables simultaneously, which adds ~1-2 GiB of hash-table overhead on top of the ~1 GiB BDD arena, exceeding the 4 GiB wasm32 heap. Because `HashMap::insert` uses infallible allocation, this surfaces as a Rust panic rather than a clean `Err` return, trapping the wasm.
+
+Fix: we call `node_count()` first to get the exact DAG size, then `HashMap::reserve(n)` on the cache's map before calling `sat_count`. This costs one extra O(N) traversal but eliminates the rehash spike, trading ~15% extra time for about one more doubling (k) of scaling headroom. See `BDD::sat_count` in `crates/oxidd-wasm/src/lib.rs`.
 
 ## License
 
