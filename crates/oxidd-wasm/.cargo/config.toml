@@ -3,7 +3,11 @@ rustflags = [
   "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
   "-C", "link-arg=--import-memory",
   "-C", "link-arg=--shared-memory",
-  "-C", "link-arg=--max-memory=1073741824",
+  # 4 GiB = the wasm32 ceiling. The multiplication relation at k=14
+  # is ~10M final nodes, with peak ~5× that during bitblasting; at
+  # 16 B per node the slot table alone can need 800 MiB, above a
+  # 1 GiB cap after stacks and apply cache are accounted for.
+  "-C", "link-arg=--max-memory=4294967296",
   "-C", "link-arg=--export=__wasm_init_tls",
   "-C", "link-arg=--export=__tls_size",
   "-C", "link-arg=--export=__tls_align",

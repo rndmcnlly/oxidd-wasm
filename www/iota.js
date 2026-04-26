@@ -95,6 +95,20 @@ export class Client {
   register(obj, handle) {
     this._registry.register(obj, handle);
   }
+
+  /// Tear down the worker and its rayon pool. The worker's linear
+  /// memory is released along with the worker itself; a subsequent
+  /// `new Client()` starts from a fresh Wasm instance. This is the
+  /// only reliable way to shrink Wasm memory in the browser, since
+  /// dropping a manager frees slots in the node table but never
+  /// shrinks the memory pages that back it.
+  terminate() {
+    try { this.worker.terminate(); } catch (_) { /* already dead */ }
+    for (const { reject } of this.pending.values()) {
+      reject(new Error("Client terminated"));
+    }
+    this.pending.clear();
+  }
 }
 
 // ---------------------------------------------------------------------------

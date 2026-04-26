@@ -1034,4 +1034,122 @@ mod tests {
         let c2 = image.count_with_nvars(2, 4).unwrap();
         assert_eq!(c2, 1.0, "care-set count should be 1");
     }
+
+    /// Probe: report Rust-native inner-node size.
+    ///
+    /// For the index manager with BDD (ARITY=2), a node is:
+    ///   rc: AtomicU32 (4) + level: AtomicU32 (4) + [Edge; 2] (2 * 4) = 16 bytes.
+    /// Terminal management is a separate concern; inner nodes dominate.
+    ///
+    /// Run with:
+    ///   cargo test --lib --release sizeof_bdd_node -- --nocapture --ignored
+    #[test]
+    #[ignore]
+    fn sizeof_bdd_node() {
+        use std::mem::size_of;
+        // We can't name the private NodeWithLevel type here, but we can
+        // reason about it and also measure via actual allocation.
+        // AtomicU32 = u32 = 4 bytes; Edge = u32 = 4 bytes; 2 edges + rc + level = 16.
+        let node_bytes = 4 + 4 + 4 * 2;
+        println!("theoretical BDD inner-node size: {} bytes", node_bytes);
+
+        // Double-check by building a BDD of known size and dividing.
+        let mgr = new_mgr(1);
+        let n = 14_u32; // 2^14 = 16384 paths; random-ish BDD
+        mgr.add_vars(n);
+        let mut p = Prog::new();
+        // Build a "parity of first half XOR all-and of second half" type thing
+        // that yields a non-trivial node count.
+        let vars: Vec<u32> = (0..n).map(|i| p.var(i)).collect();
+        // AND tree
+        let mut tree = vars[0];
+        for &v in &vars[1..] {
+            tree = p.and(tree, v);
+        }
+        p.set_outputs(vec![tree]);
+        let _res = p.run(&mgr);
+        let nodes = mgr.num_inner_nodes();
+        println!("AND-tree of {} vars: {} inner nodes ({} B each = {} KiB)",
+            n, nodes, node_bytes, nodes * node_bytes / 1024);
+    }
+
+    /// Probe: how many nodes does the k-bit mult-relation produce, and
+    /// how does it scale? This drives the WASM memory sizing calc.
+    ///
+    /// Run with:
+    ///   cargo test --lib --release mult_relation_scaling -- --nocapture --ignored
+    #[test]
+    #[ignore]
+    fn mult_relation_scaling() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(mult_relation_scaling_impl)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn mult_relation_scaling_impl() {
+        // Scan k=4..13 (larger may exhaust native memory for unit tests).
+        // Each k runs on its own thread so residual state can't leak
+        // between iterations and a blowup at k=N doesn't kill the report.
+        for k in 4..=13 {
+            let handle = std::thread::Builder::new()
+                .stack_size(64 * 1024 * 1024)
+                .spawn(move || mult_relation_scaling_one(k))
+                .unwrap();
+            if let Err(e) = handle.join() {
+                println!("k={:2}: PANIC ({:?})", k, e);
+            }
+        }
+    }
+
+    fn mult_relation_scaling_one(k: u32) {
+            let cap = (1_usize << (2 * k + 4)).max(1 << 14).min(1 << 26);
+            let mgr = BDDManager::new(cap, cap / 4, 1);
+            mgr.add_vars(3 * k);
+
+            let mut p = Prog::new();
+            let t = p.t(); let f = p.f();
+            let xb: Vec<u32> = (0..k).map(|v| p.var(v)).collect();
+            let yb: Vec<u32> = (k..2*k).map(|v| p.var(v)).collect();
+            let zb: Vec<u32> = (2*k..3*k).map(|v| p.var(v)).collect();
+
+            let full_add = |p: &mut Prog, a: u32, b: u32, cin: u32| -> (u32, u32) {
+                let axb = p.xor(a, b); let sum = p.xor(axb, cin);
+                let aab = p.and(a, b); let caxb = p.and(cin, axb);
+                let cout = p.or(aab, caxb); (sum, cout)
+            };
+            let add_bits = |p: &mut Prog, xs: &[u32], ys: &[u32], fc: u32| -> Vec<u32> {
+                let mut out = Vec::with_capacity(xs.len());
+                let mut carry = fc;
+                for i in 0..xs.len() { let (s,c)=full_add(p,xs[i],ys[i],carry); out.push(s); carry=c; }
+                out
+            };
+            let mul_bits = |p: &mut Prog, xs: &[u32], ys: &[u32], fc: u32| -> Vec<u32> {
+                let kk = xs.len();
+                let mut acc: Vec<u32> = vec![fc; kk];
+                for i in 0..kk {
+                    let mut partial = Vec::with_capacity(kk);
+                    for j in 0..kk { partial.push(if j<i {fc} else {p.and(xs[j-i], ys[i])}); }
+                    acc = add_bits(p, &acc, &partial, fc);
+                }
+                acc
+            };
+
+            let product = mul_bits(&mut p, &xb, &yb, f);
+            let mut eq = t;
+            for i in 0..k as usize { let be = p.equiv(product[i], zb[i]); eq = p.and(eq, be); }
+            p.set_outputs(vec![eq]);
+
+            let t0 = std::time::Instant::now();
+            let _rel = p.run(&mgr);
+            let elapsed = t0.elapsed();
+            let nodes = mgr.num_inner_nodes();
+            let mem_mib = nodes * 16 / (1024 * 1024);
+            println!(
+                "k={:2}: {:>10} nodes, {:>5} MiB @ 16B/node, built in {:>6.1} ms",
+                k, nodes, mem_mib, elapsed.as_secs_f64() * 1000.0,
+            );
+    }
 }

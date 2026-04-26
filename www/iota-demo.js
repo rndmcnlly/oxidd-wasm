@@ -142,16 +142,35 @@ async function demoReachOnContext(ctx, bits) {
 // ---------- Scaling: x*y=z at several widths ----------
 
 async function runMultRelation(client, bits, threads, splitDepth = null) {
-  // Size the manager to the workload. Bitblasting the multiplication
-  // relation produces far more intermediate nodes than end up in the
-  // final BDD, so we need to budget for peak, not final. Rough empirical
-  // scaling: peak ~10-20× the final node count for k up to 10.
+  // Size the manager to the workload. The multiplication relation's
+  // final BDD grows ~2.7× per bit (canonical Bryant exponential blowup).
+  // Peak node count during bitblasting is higher than final; for a
+  // parallel manager the peak is higher still because multiple rayon
+  // tasks each hold intermediate BDDs alive concurrently.
   //
-  // We're constrained by WASM's 1 GiB linear-memory cap and the fact
-  // that it never shrinks: each Context.close() reclaims logical slots
-  // but not physical pages. Keeping budgets tight lets us finish the
-  // whole sweep in one process.
-  const nodeBudget = bits <= 7 ? (1 << 16) : bits <= 9 ? (1 << 19) : (1 << 21);
+  // Native measurements of the FINAL relation size:
+  //   k=10: 194k nodes     k=12: 1.4M     k=13: 3.9M     k=14: ~10M
+  //
+  // Rough peak multipliers I've observed: ~5× final for single-thread,
+  // ~8-12× for 16-thread with non-zero split_depth. Empirical table
+  // below targets "peak that avoids 'AND: oom' errors".
+  const peakEstimate = (() => {
+    // Bryant exponent table (final-size only), bits -> nodes,
+    // measured on our native Rust test suite:
+    const finalTable = {
+      5: 1.3e3, 6: 3.5e3, 7: 1.0e4, 8: 2.7e4, 9: 7.1e4,
+      10: 2.0e5, 11: 5.2e5, 12: 1.4e6, 13: 3.9e6, 14: 1.1e7,
+    };
+    const finalNodes = finalTable[bits] ?? Math.pow(2.72, bits);
+    // Bigger multiplier for multi-threaded runs: parallel apply keeps
+    // more intermediates alive at once.
+    const peakMultiplier = threads > 1 ? 8 : 5;
+    return Math.ceil(finalNodes * peakMultiplier);
+  })();
+  // Cap at 1<<26 (~67M nodes, ~1 GiB of slots) within the 4 GiB wasm32
+  // linear-memory ceiling. Beyond that the Edge type (32-bit index)
+  // starts approaching its own limit anyway.
+  const nodeBudget = Math.max(1 << 14, Math.min(1 << 26, peakEstimate));
   const cacheBudget = nodeBudget >>> 2;
   const ctx = await Context.fromClient(client, {
     innerCap: nodeBudget, cacheCap: cacheBudget, threads,
@@ -188,9 +207,14 @@ async function runMultRelation(client, bits, threads, splitDepth = null) {
 }
 
 async function main() {
-  const hw = navigator.hardwareConcurrency || 1;
+  // Cap the mt pool at 4 threads. More workers = more per-thread stack
+  // reserved in the shared 1 GiB of Wasm linear memory (each one is
+  // 8 MiB), which is space that can't hold BDD nodes. At 16 threads we
+  // lose 128 MiB to stacks alone, and apply-scaling gains are modest
+  // in the browser anyway due to Web Worker scheduling overhead.
+  const hw = Math.min(navigator.hardwareConcurrency || 1, 4);
   log(`iota demo — batched command buffers`);
-  log(`  hardware threads:  ${hw}`);
+  log(`  hardware threads:  ${navigator.hardwareConcurrency || 1} (using ${hw})`);
   log(`  SharedArrayBuffer: ${typeof SharedArrayBuffer !== "undefined"}`);
 
   log("\nSpinning up single-threaded client...");
@@ -207,31 +231,38 @@ async function main() {
   const reachCtx = await Context.fromClient(stClient, { innerCap: 1 << 20, cacheCap: 1 << 18, threads: 1 });
   await demoReachOnContext(reachCtx, 5);
 
-  // Multi-thread client for the scaling demo.
-  let mtClient = null;
-  if (hw > 1) {
-    log(`\nSpinning up ${hw}-thread client...`);
-    const t0 = performance.now();
-    mtClient = new Client();
-    await mtClient.loaded;
-    await mtClient.init(hw);
-    log(`  pool ready in ${(performance.now() - t0).toFixed(0)}ms`);
-  }
+  // Correctness demos done. Release the worker so the scaling sweep
+  // starts from clean Wasm memory.
+  stClient.terminate();
 
-  // Scaling demo with split-depth tuning. oxidd's default split_depth on
-  // a 16-thread pool is log2(4096*16) = 16, meaning apply ops spawn
-  // parallel tasks for the first 16 levels of recursion — far too
-  // aggressive for the browser's task-overhead profile. We sweep several
-  // depths to find a better sweet spot.
+  // For the scaling sweep we spawn a fresh Client per (threads, k)
+  // configuration. Wasm linear memory only ever grows: a Context.close()
+  // frees the node table's slots but not the Wasm pages backing it, so
+  // a sequential sweep accumulates peak-sized allocations across
+  // iterations and eventually OOMs. Spinning up a fresh worker gives
+  // each k a clean slate.
+  const makeClient = async (numThreads) => {
+    const c = new Client();
+    await c.loaded;
+    await c.init(numThreads);
+    return c;
+  };
+
+  // Scaling demo with split-depth tuning. oxidd's default split_depth
+  // is log2(4096 * num_threads): at 4 threads, = 14. apply ops spawn
+  // parallel tasks for the first 14 levels of recursion, which is too
+  // aggressive for the browser's task-overhead profile. We sweep
+  // smaller depths to find a better sweet spot.
   log("\n=== Scaling demo: x * y = z ===");
-  log("  st = single-threaded; mt(d) = 16 threads with split_depth=d");
-  log(`  (oxidd's default split_depth for 16 threads is log2(4096*16) = 16)`);
+  log(`  st = single-threaded; mt(d) = ${hw} threads with split_depth=d`);
+  log(`  (oxidd's default split_depth for ${hw} threads is log2(4096*${hw}) = ${Math.log2(4096 * hw).toFixed(0)})`);
 
-  const depths = mtClient ? [0, 4] : [];
+  const depths = hw > 1 ? [0, 4] : [];
   const header = [
     "k".padStart(2),
-    "nodes".padStart(8),
-    "st(ms)".padStart(8),
+    "nodes".padStart(10),
+    "MiB".padStart(6),
+    "st(ms)".padStart(9),
     ...depths.map((d) => `mt(${d})ms`.padStart(10)),
     "best-mt".padStart(8),
     "speedup".padStart(7),
@@ -251,18 +282,28 @@ async function main() {
     }
   };
 
-  for (const k of [5, 7, 9, 10]) {
-    const stR = await runSafe(`st k=${k}`, () => runMultRelation(stClient, k, 1));
+  for (const k of [7, 10, 12, 13, 14]) {
+    // Fresh st client per k so Wasm memory from prior (large) iterations
+    // doesn't starve this one.
+    const stClientK = await makeClient(1);
+    const stR = await runSafe(`st k=${k}`, () => runMultRelation(stClientK, k, 1));
+    stClientK.terminate();
+
     const mtRs = [];
-    for (const d of depths) {
-      mtRs.push({
-        d,
-        r: await runSafe(`mt(${d}) k=${k}`, () => runMultRelation(mtClient, k, hw, d)),
-      });
+    if (hw > 1) {
+      for (const d of depths) {
+        const mtClientK = await makeClient(hw);
+        mtRs.push({
+          d,
+          r: await runSafe(`mt(${d}) k=${k}`, () => runMultRelation(mtClientK, k, hw, d)),
+        });
+        mtClientK.terminate();
+      }
     }
 
     const stCell = stR.kind === "ok" ? stR.value.totalMs.toFixed(1) : "ERR";
     const stNodes = stR.kind === "ok" ? String(stR.value.nodes) : "-";
+    const stMiB = stR.kind === "ok" ? (stR.value.nodes * 16 / (1024 * 1024)).toFixed(1) : "-";
     const stOk = stR.kind === "ok" && stR.value.ok;
 
     const mtCells = mtRs.map(({ r }) => r.kind === "ok" ? r.value.totalMs.toFixed(1) : "ERR");
@@ -272,8 +313,9 @@ async function main() {
     const allOk = stOk && mtRs.every(({ r }) => r.kind === "ok" && r.value.ok);
     const row = [
       String(k).padStart(2),
-      stNodes.padStart(8),
-      stCell.padStart(8),
+      stNodes.padStart(10),
+      stMiB.padStart(6),
+      stCell.padStart(9),
       ...mtCells.map((c) => c.padStart(10)),
       bestMt !== null ? bestMt.toFixed(1).padStart(8) : "-".padStart(8),
       (bestMt !== null && stR.kind === "ok") ? (stR.value.totalMs / bestMt).toFixed(2).padStart(7) : "-".padStart(7),

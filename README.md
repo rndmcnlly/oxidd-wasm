@@ -142,7 +142,7 @@ For reference (and for anyone trying to replicate this), the working set of `RUS
 -C target-feature=+atomics,+bulk-memory,+mutable-globals
 -C link-arg=--import-memory
 -C link-arg=--shared-memory
--C link-arg=--max-memory=1073741824
+-C link-arg=--max-memory=4294967296
 -C link-arg=--export=__wasm_init_tls
 -C link-arg=--export=__tls_size
 -C link-arg=--export=__tls_align
