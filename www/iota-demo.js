@@ -155,6 +155,7 @@ async function runMultRelation(client, bits) {
       10: 2.0e5, 11: 5.2e5, 12: 1.4e6, 13: 3.9e6, 14: 1.1e7,
       15: 1.0e7,
       16: 2.9e7,
+      17: 8.2e7,
     };
     const finalNodes = finalTable[bits] ?? Math.pow(2.72, bits);
     return Math.ceil(finalNodes * 5);
@@ -264,7 +265,14 @@ async function main() {
   // old and new tables, blowing the 4 GiB wasm32 ceiling). We now
   // pre-size the SatCountCache to the exact node count, eliminating
   // the rehash. k=16 typically produces ~27-30M nodes.
-  for (const k of [7, 10, 12, 13, 14, 15, 16]) {
+  // k=17 is included as a "show the wall" run: ~84M final nodes × 16 B
+  // ≈ 1.3 GiB for the slot table alone, plus unique table (+69%) and
+  // apply cache (+37%) ≈ 2.7 GiB resident; peak during apply typically
+  // 3-5× final nodes, which exceeds the 4 GiB wasm32 ceiling. In
+  // practice this fails inside an apply step (e.g. "OR: oom") through
+  // oxidd's fallible AllocResult path — a rejected promise, not a
+  // panic or trap. runSafe catches it and the sweep continues.
+  for (const k of [7, 10, 12, 13, 14, 15, 16, 17]) {
     const c = await makeClient();
     const r = await runSafe(`k=${k}`, () => runMultRelation(c, k));
     c.terminate();

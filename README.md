@@ -5,7 +5,7 @@ WebAssembly bindings for [OxiDD](https://github.com/oxidd/oxidd), exposing Binar
 **Live demos:**
 
 - **[oxidd-wasm](https://rndmcnlly.github.io/oxidd-wasm/)**: raw BDD primitives, 8-queens example.
-- **[iota](https://rndmcnlly.github.io/oxidd-wasm/iota.html)**: typed symbolic programming built on top (uints, bools, primed variables, reachability, mult-relation scaling up to k=16).
+- **[iota](https://rndmcnlly.github.io/oxidd-wasm/iota.html)**: typed symbolic programming built on top (uints, bools, primed variables, reachability, mult-relation scaling up to k=16 with a clean OOM boundary at k=17).
 
 ## What this is
 
@@ -130,6 +130,21 @@ The resulting Wasm module is about 45% smaller (162 KB vs 294 KB), deploys to an
 At k=16 the multiplication-relation apply completes fine, but validation (`sat_count`) used to OOM. The cause: oxidd's `SatCountCache` is a `HashMap<NodeID, f64>` that grows by doubling. The final rehash before reaching ~30M entries briefly holds both the old (32M-bucket) and new (64M-bucket) tables simultaneously, which adds ~1-2 GiB of hash-table overhead on top of the ~1 GiB BDD arena, exceeding the 4 GiB wasm32 heap. Because `HashMap::insert` uses infallible allocation, this surfaces as a Rust panic rather than a clean `Err` return, trapping the wasm.
 
 Fix: we call `node_count()` first to get the exact DAG size, then `HashMap::reserve(n)` on the cache's map before calling `sat_count`. This costs one extra O(N) traversal but eliminates the rehash spike, trading ~15% extra time for about one more doubling (k) of scaling headroom. See `BDD::sat_count` in `crates/oxidd-wasm/src/lib.rs`.
+
+### Measured scaling (browser, k = bits of x * y = z)
+
+| k  | final nodes | slot MiB | total (s) | status            |
+|----|-------------|---------:|----------:|-------------------|
+| 7  |       2,634 |     0.04 |    0.002  | PASS              |
+| 10 |      58,533 |     0.9  |    0.015  | PASS              |
+| 12 |     464,183 |     7.1  |    0.14   | PASS              |
+| 13 |   1,292,160 |    19.7  |    0.45   | PASS              |
+| 14 |   3,697,097 |    56.4  |    1.49   | PASS              |
+| 15 |  10,304,530 |   157.2  |    6.71   | PASS              |
+| 16 |  29,511,259 |   450.3  |   22.99   | PASS              |
+| 17 |          — |       — |        — | OOM inside apply  |
+
+k=17 fails inside an apply step (e.g. `OR: oom`) through oxidd's fallible `AllocResult` path: a rejected promise, not a panic. That's the 4 GiB wasm32 ceiling itself, not a fixable allocation spike — peak memory during apply is roughly 3-5× final-node size, and k=17's ~84M final nodes × ~33 B amortized (slot + unique table + apply cache) ≈ 2.7 GiB resident before peak.
 
 ## License
 
